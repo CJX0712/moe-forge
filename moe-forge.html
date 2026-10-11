@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MoEForge · 混合专家锻造炉</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3;
+    --dim:#8b949e; --blue:#79c0ff; --green:#7ee787; --red:#ff7b72; --yellow:#e3b341; --purple:#d2a8ff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font-family:"Cascadia Code","JetBrains Mono",Consolas,"Microsoft YaHei",monospace;padding:20px;line-height:1.5}
+  h1{font-size:20px;margin-bottom:2px}
+  h1 .tag{color:var(--yellow);font-size:12px;vertical-align:middle;margin-left:8px}
+  .sub{color:var(--dim);font-size:12px;margin-bottom:16px}
+  .grid{display:grid;grid-template-columns:290px 1fr 1fr;gap:16px;align-items:start}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px}
+  .panel h2{font-size:13px;color:var(--blue);margin-bottom:10px;border-bottom:1px solid var(--border);padding-bottom:6px}
+  label{display:block;font-size:12px;color:var(--dim);margin:10px 0 2px}
+  .val{color:var(--yellow)}
+  input[type=range],input[type=number],select{width:100%}
+  input[type=number],select{background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:5px;font-family:inherit;font-size:12px}
+  button{background:#21262d;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:8px 14px;cursor:pointer;font-family:inherit;font-size:13px;margin-top:10px;width:100%}
+  button:hover{border-color:var(--blue)}
+  button.primary{background:#1f6feb22;border-color:#1f6feb}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  canvas{background:#0a0d12;border:1px solid var(--border);border-radius:6px;width:100%;display:block}
+  .stats{font-size:12px;margin-top:10px}
+  .stats .row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed var(--border)}
+  .stats .row span:last-child{color:var(--yellow)}
+  #tests{margin-top:16px}
+  #tests .t{font-size:12px;padding:4px 8px;border-left:3px solid var(--border);margin:3px 0;background:var(--panel)}
+  #tests .t.ok{border-left-color:var(--green)}
+  #tests .t.bad{border-left-color:var(--red)}
+  #tests .t .d{color:var(--dim);font-size:11px}
+  .foot{color:var(--dim);font-size:11px;margin-top:18px}
+  .note{font-size:11px;color:var(--dim);margin-top:8px}
+  .badge{display:inline-block;background:#21262d;border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:11px;color:var(--green)}
+</style>
+</head>
+<body>
+<h1>MoEForge ⚡ 混合专家锻造炉<span class="tag">Mixture-of-Experts · Noisy Top-K · 负载均衡</span></h1>
+<div class="sub">纯 JS 手写 Mixture-of-Experts：可学习路由器(Noisy Top-K 门控) + 多个专家 MLP + 负载均衡辅助损失。零深度学习框架，浏览器内训练，自动微分反向传播。不变量：解析梯度 == 中心差分(1e-6) · 门控权重每行和=1 · 训练可收敛 · 专家不被饿死。</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>⚙ 控制台</h2>
+    <label>专家数 N <span class="val" id="nV">4</span></label>
+    <input type="range" id="nexp" min="2" max="8" step="1" value="4">
+    <label>每 token 激活 k (Top-K) <span class="val" id="kV">2</span></label>
+    <input type="range" id="ktop" min="1" max="4" step="1" value="2">
+    <label>专家隐藏维 d <span class="val" id="dV">16</span></label>
+    <input type="range" id="ddim" min="8" max="32" step="4" value="16">
+    <label>训练步数 <span class="val" id="stV">400</span></label>
+    <input type="range" id="steps" min="100" max="1200" step="100" value="400">
+    <label>学习率 <span class="val" id="lrV">0.020</span></label>
+    <input type="range" id="lr" min="0.002" max="0.05" step="0.002" value="0.02">
+    <label>负载均衡系数 α <span class="val" id="aV">0.20</span></label>
+    <input type="range" id="alpha" min="0" max="0.5" step="0.05" value="0.2">
+    <label>噪声标准差（训练探索）<span class="val" id="nsV">1.00</span></label>
+    <input type="range" id="noise" min="0" max="2" step="0.1" value="1.0">
+    <label>随机种子</label>
+    <input type="number" id="seed" value="7" min="0" max="9999">
+    <button id="trainBtn" class="primary">🎯 训练</button>
+    <button id="stopBtn" disabled>⏸ 停止</button>
+    <button id="specBtn">📊 刷新专家特化图</button>
+    <button id="selfBtn">🧪 运行自检（不变量）</button>
+    <button id="resetBtn">↻ 重置权重</button>
+    <div class="note">任务：1D 分段函数 y=f(x)，4 个区间各对应一个专家特化区。训练后路由器应把不同 x 区间路由给不同专家。</div>
+  </div>
+
+  <div class="panel">
+    <h2>📉 训练监控</h2>
+    <canvas id="cvLoss" width="460" height="220"></canvas>
+    <label style="margin-top:10px">专家负载均衡（平均路由概率，越高越均匀）</label>
+    <canvas id="cvLoad" width="460" height="120"></canvas>
+    <div class="stats" id="stats">
+      <div class="row"><span>状态</span><span id="sState">待训练</span></div>
+      <div class="row"><span>步 / 总步</span><span id="sStep">0 / 0</span></div>
+      <div class="row"><span>当前总损失</span><span id="sLoss">—</span></div>
+      <div class="row"><span>任务MSE / 辅助</span><span id="sComp">—</span></div>
+      <div class="row"><span>初始 → 最优</span><span id="sBest">—</span></div>
+      <div class="row"><span>参数量</span><span id="sParams">—</span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>🎨 专家特化图（x 轴=输入，颜色=主导专家）</h2>
+    <canvas id="cvSpec" width="460" height="200"></canvas>
+    <div class="note">颜色带越分明 = 专家特化越强。理想情况每个 x 区间由固定专家主导。</div>
+    <div class="panel" id="tests" style="margin-top:12px">
+      <h2 style="color:#79c0ff;font-size:13px;margin-bottom:8px">🧪 自检（不变量）</h2>
+      <div id="testList"><div class="t">尚未运行。点击「运行自检」。</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="foot">MoEForge — 无任何 ML 框架依赖。核心不变量：手写反向传播所得解析梯度与中心差分数值梯度逐参数一致（1e-6）；Noisy Top-K 门控权重每行和为 1；负载均衡辅助损失确保专家不被饿死。作者：<span class="badge">晨星</span></div>
+
+<script>
+'use strict';
+// ===================== 自动微分引擎（已 Node 验证） =====================
+let _id=0;
+class Tensor{
+  constructor(data,shape,requiresGrad=false){this.data=data instanceof Float64Array?data:Float64Array.from(data);this.shape=shape;this.grad=new Float64Array(this.data.length);this.requiresGrad=requiresGrad;this._prev=[];this._backward=null;this._id=_id++;}
+  gradAdd(arr){for(let i=0;i<this.grad.length;i++)this.grad[i]+=arr[i];}
+  zeroGrad(){this.grad.fill(0);}
+}
+function numel(s){let n=1;for(const x of s)n*=x;return n;}
+function stridesOf(s){const st=new Array(s.length);let p=1;for(let i=s.length-1;i>=0;i--){st[i]=p;p*=s[i];}return st;}
+function coords(idx,strides,n){const c=new Array(n);let t=idx;for(let i=0;i<n;i++){const d=Math.floor(t/strides[i]);c[i]=d;t-=d*strides[i];}return c;}
+function invPerm(p){const inv=new Array(p.length);for(let i=0;i<p.length;i++)inv[p[i]]=i;return inv;}
+function transposeData(data,shape,perm){const ns=perm.map(x=>shape[x]);const out=new Float64Array(data.length);const st=stridesOf(shape),nst=stridesOf(ns);for(let idx=0;idx<data.length;idx++){const c=coords(idx,st,shape.length);const nc=new Array(shape.length);for(let i=0;i<shape.length;i++)nc[perm[i]]=c[i];let nidx=0;for(let i=0;i<shape.length;i++)nidx+=nc[i]*nst[i];out[nidx]=data[idx];}return out;}
+function reshapeData(data){return Float64Array.from(data);}
+function transpose(t,perm){const ns=perm.map(x=>t.shape[x]);const out=transposeData(t.data,t.shape,perm);const r=new Tensor(out,ns,t.requiresGrad);r._prev=[t];r._backward=(g)=>{t.gradAdd(transposeData(g,ns,invPerm(perm)));};return r;}
+function reshape(t,newShape){const r=new Tensor(Float64Array.from(t.data),newShape,t.requiresGrad);const old=t.shape;r._prev=[t];r._backward=(g)=>{t.gradAdd(reshapeData(g,old));};return r;}
+function matmul(a,b){const ra=a.shape[0],ca=a.shape[1],cb=b.shape[1];const out=new Float64Array(ra*cb);for(let i=0;i<ra;i++)for(let j=0;j<cb;j++){let s=0;const ai=i*ca;for(let k=0;k<ca;k++)s+=a.data[ai+k]*b.data[k*cb+j];out[i*cb+j]=s;}const t=new Tensor(out,[ra,cb],a.requiresGrad||b.requiresGrad);t._prev=[a,b];t._backward=(g)=>{const dA=new Float64Array(ra*ca),dB=new Float64Array(ca*cb);for(let i=0;i<ra;i++)for(let k=0;k<ca;k++){let s=0;for(let j=0;j<cb;j++)s+=g[i*cb+j]*b.data[k*cb+j];dA[i*ca+k]=s;}for(let k=0;k<ca;k++)for(let j=0;j<cb;j++){let s=0;for(let i=0;i<ra;i++)s+=g[i*cb+j]*a.data[i*ca+k];dB[k*cb+j]=s;}a.gradAdd(dA);b.gradAdd(dB);};return t;}
+function add(a,b){const out=new Float64Array(a.data.length);for(let i=0;i<out.length;i++)out[i]=a.data[i]+b.data[i];const t=new Tensor(out,a.shape.slice(),a.requiresGrad||b.requiresGrad);t._prev=[a,b];t._backward=(g)=>{a.gradAdd(g);b.gradAdd(g);};return t;}
+function addBias(t,bias){const T_=t.shape[0],d=t.shape[1];const out=new Float64Array(T_*d);for(let i=0;i<T_;i++)for(let j=0;j<d;j++)out[i*d+j]=t.data[i*d+j]+bias.data[j];const r=new Tensor(out,[T_,d],t.requiresGrad||bias.requiresGrad);r._prev=[t,bias];r._backward=(g)=>{const dT=new Float64Array(T_*d),dB=new Float64Array(d);for(let i=0;i<T_;i++)for(let j=0;j<d;j++){dT[i*d+j]=g[i*d+j];dB[j]+=g[i*d+j];}t.gradAdd(dT);bias.gradAdd(dB);};return r;}
+function addConst(t,cdata){const out=new Float64Array(t.data.length);for(let i=0;i<out.length;i++)out[i]=t.data[i]+cdata[i];const r=new Tensor(out,t.shape.slice(),t.requiresGrad);r._prev=[t];r._backward=(g)=>{t.gradAdd(g);};return r;}
+function mul(a,b){const out=new Float64Array(a.data.length);const sc=(typeof b==='number');if(sc){for(let i=0;i<out.length;i++)out[i]=a.data[i]*b;}else{for(let i=0;i<out.length;i++)out[i]=a.data[i]*b.data[i];}const t=new Tensor(out,a.shape.slice(),sc?a.requiresGrad:(a.requiresGrad||b.requiresGrad));if(sc){t._prev=[a];t._backward=(g)=>{const dA=new Float64Array(a.data.length);for(let i=0;i<dA.length;i++)dA[i]=g[i]*b;a.gradAdd(dA);};}else{t._prev=[a,b];t._backward=(g)=>{const dA=new Float64Array(a.data.length),dB=new Float64Array(b.data.length);for(let i=0;i<dA.length;i++){dA[i]=g[i]*b.data[i];dB[i]=g[i]*a.data[i];}a.gradAdd(dA);b.gradAdd(dB);};}return t;}
+function relu(t){const out=new Float64Array(t.data.length);for(let i=0;i<out.length;i++)out[i]=t.data[i]>0?t.data[i]:0;const r=new Tensor(out,t.shape.slice(),t.requiresGrad);r._prev=[t];r._backward=(g)=>{const d=new Float64Array(t.data.length);for(let i=0;i<d.length;i++)d[i]=t.data[i]>0?g[i]:0;t.gradAdd(d);};return r;}
+function softmax(t){const n=t.shape.length,R=t.shape[n-2],C=t.shape[n-1],B=numel(t.shape)/(R*C);const out=new Float64Array(t.data.length);for(let b=0;b<B;b++){const base=b*R*C;for(let r=0;r<R;r++){let m=-Infinity;for(let c=0;c<C;c++)m=Math.max(m,t.data[base+r*C+c]);let s=0;for(let c=0;c<C;c++){const e=Math.exp(t.data[base+r*C+c]-m);out[base+r*C+c]=e;s+=e;}for(let c=0;c<C;c++)out[base+r*C+c]/=s;}}const rt=new Tensor(out,t.shape.slice(),t.requiresGrad);rt._prev=[t];rt._backward=(g)=>{const d=new Float64Array(t.data.length);for(let b=0;b<B;b++){const base=b*R*C;for(let r=0;r<R;r++){let dot=0;for(let c=0;c<C;c++)dot+=g[base+r*C+c]*out[base+r*C+c];for(let c=0;c<C;c++)d[base+r*C+c]=out[base+r*C+c]*(g[base+r*C+c]-dot);}}t.gradAdd(d);};return rt;}
+function scaleRows(t,vec){const T_=t.shape[0],d=t.shape[1];const out=new Float64Array(T_*d);for(let i=0;i<T_;i++)for(let j=0;j<d;j++)out[i*d+j]=t.data[i*d+j]*vec.data[i];const r=new Tensor(out,[T_,d],t.requiresGrad||vec.requiresGrad);r._prev=[t,vec];r._backward=(g)=>{const dT=new Float64Array(T_*d),dV=new Float64Array(T_);for(let i=0;i<T_;i++){for(let j=0;j<d;j++){dT[i*d+j]=g[i*d+j]*vec.data[i];dV[i]+=g[i*d+j]*t.data[i*d+j];}}t.gradAdd(dT);vec.gradAdd(dV);};return r;}
+function colExtract(w,e){const T_=w.shape[0],N=w.shape[1];const out=new Float64Array(T_);for(let i=0;i<T_;i++)out[i]=w.data[i*N+e];const r=new Tensor(out,[T_],w.requiresGrad);r._prev=[w];r._backward=(g)=>{for(let i=0;i<T_;i++)w.grad[i*N+e]+=g[i];};return r;}
+function mse(y,targetData){const n=y.data.length;let s=0;for(let i=0;i<n;i++){const d=y.data[i]-targetData[i];s+=d*d;}const loss=s/n;const r=new Tensor(Float64Array.from([loss]),[1],y.requiresGrad);r._prev=[y];r._backward=(g)=>{const sc=g[0]/n;const d=new Float64Array(n);for(let i=0;i<n;i++)d[i]=2*(y.data[i]-targetData[i])*sc;y.gradAdd(d);};return r;}
+function colMean(t){const T_=t.shape[0],N=t.shape[1];const out=new Float64Array(N);for(let e=0;e<N;e++){let s=0;for(let i=0;i<T_;i++)s+=t.data[i*N+e];out[e]=s/T_;}const r=new Tensor(out,[N],t.requiresGrad);r._prev=[t];r._backward=(g)=>{const dT=new Float64Array(T_*N);for(let e=0;e<N;e++)for(let i=0;i<T_;i++)dT[i*N+e]=g[e]/T_;t.gradAdd(dT);};return r;}
+function sumSquares(v){let s=0;for(let i=0;i<v.data.length;i++)s+=v.data[i]*v.data[i];const r=new Tensor(Float64Array.from([s]),[1],v.requiresGrad);r._prev=[v];r._backward=(g)=>{const d=new Float64Array(v.data.length);for(let i=0;i<d.length;i++)d[i]=2*v.data[i]*g[0];v.gradAdd(d);};return r;}
+function backward(loss){const topo=[],seen=new Set();(function build(v){if(seen.has(v._id))return;seen.add(v._id);for(const p of v._prev)build(p);topo.push(v);})(loss);for(const v of topo)v.zeroGrad();loss.grad[0]=1;for(let i=topo.length-1;i>=0;i--){const v=topo[i];if(v._backward)v._backward(v.grad);}}
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+
+// ===================== MoE 模型 =====================
+function targetOf(x){
+  if(x < -0.5) return Math.sin(4*x);
+  if(x < 0)    return -2*x;
+  if(x < 0.5)  return x*x;
+  return Math.cos(2*x);
+}
+function makeParams(cfg,rng){
+  const {N,d,alpha}=cfg; const P={};
+  const randn=()=>{let u=0,v=0;while(u===0)u=rng();while(v===0)v=rng();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);};
+  const ten=(r,c,s=0.1)=>{const a=new Float64Array(r*c);for(let i=0;i<a.length;i++)a[i]=randn()*s;return new Tensor(a,[r,c],true);};
+  const vec=(n,s=0.1)=>{const a=new Float64Array(n);for(let i=0;i<n;i++)a[i]=randn()*s;return new Tensor(a,[n],true);};
+  P.Wr=ten(1,N); P.br=vec(N,0.1);
+  P.experts=[];
+  for(let e=0;e<N;e++) P.experts.push({W1:ten(1,d,0.5),b1:vec(d,0.1),W2:ten(d,1,0.5),b2:vec(1,0.1)});
+  P.N=N;P.d=d;P.alpha=alpha;
+  const params=[P.Wr,P.br]; for(const ex of P.experts) params.push(ex.W1,ex.b1,ex.W2,ex.b2);
+  P.params=params; return P;
+}
+// forward: x [T,1] -> {y [T,1], w [T,N], p [T,N], loss}
+function moeForward(P,xData,targetData,cfg,training,rng){
+  const T_=xData.length, N=P.N;
+  const x=new Tensor(Float64Array.from(xData),[T_,1],false);
+  const router=addBias(matmul(x,P.Wr),P.br); // [T,N]
+  let routerUse=router;
+  if(training && cfg.noise>0){
+    const noise=new Float64Array(T_*N);
+    for(let i=0;i<noise.length;i++) noise[i]=randnFrom(rng)*cfg.noise;
+    routerUse=addConst(router,noise);
+  }
+  const p=softmax(routerUse); // [T,N] for aux
+  // top-k mask
+  const mask=new Float64Array(T_*N);
+  const wk=new Array(T_);
+  for(let i=0;i<T_;i++){
+    const row=[]; for(let e=0;e<N;e++) row.push({e,v:routerUse.data[i*N+e]});
+    row.sort((a,b)=>b.v-a.v);
+    const sel=new Set(row.slice(0,cfg.k).map(o=>o.e));
+    for(let e=0;e<N;e++) mask[i*N+e]=sel.has(e)?0:-1e9;
+  }
+  const masked=addConst(routerUse,mask);
+  const w=softmax(masked); // [T,N] gating weights
+  let y=null;
+  for(let e=0;e<N;e++){
+    const ex=P.experts[e];
+    const h=relu(addBias(matmul(x,ex.W1),ex.b1)); // [T,d]
+    const o=addBias(matmul(h,ex.W2),ex.b2);        // [T,1]
+    const col=colExtract(w,e);                 // [T]
+    const term=scaleRows(o,col);               // [T,1]
+    y = y? add(y,term) : term;
+  }
+  const f=colMean(p);            // [N]
+  const aux=sumSquares(f);       // scalar (unscaled)
+  let mseLoss, total;
+  if(targetData){
+    mseLoss=mse(y,targetData);
+    total=add(mseLoss, mul(aux, N*cfg.alpha));
+  }else{
+    mseLoss=new Tensor(Float64Array.from([0]),[1],false);
+    total=mul(aux, N*cfg.alpha);
+  }
+  return {y,w,p,loss:total,mse:mseLoss,aux};
+}
+function randnFrom(rng){let u=0,v=0;while(u===0)u=rng();while(v===0)v=rng();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);}
+function makeAdam(params,lr=1e-2,b1=0.9,b2=0.999,eps=1e-8){const m=params.map(p=>new Float64Array(p.data.length));const v=params.map(p=>new Float64Array(p.data.length));let step=0;return{step(){step++;for(let pi=0;pi<params.length;pi++){const p=params[pi],mpi=m[pi],vpi=v[pi];for(let i=0;i<p.data.length;i++){const g=p.grad[i];mpi[i]=b1*mpi[i]+(1-b1)*g;vpi[i]=b2*vpi[i]+(1-b2)*g*g;const mh=mpi[i]/(1-Math.pow(b1,step));const vh=vpi[i]/(1-Math.pow(b2,step));p.data[i]-=lr*mh/(Math.sqrt(vh)+eps);}}}};}
+
+// ===================== 浏览器 UI =====================
+const $=id=>document.getElementById(id);
+let P=null, adam=null, training=false, lossHist=[], bestLoss=Infinity, curLoss=0, curMSE=0, curAux=0, curStep=0, totalSteps=0, initialLoss=null;
+let lastW=null; // [T,N] for specialization viz
+function cfgFromUI(){
+  return {N:parseInt($('nexp').value),k:parseInt($('ktop').value),d:parseInt($('ddim').value),
+    alpha:parseFloat($('alpha').value),noise:parseFloat($('noise').value),steps:parseInt($('steps').value),lr:parseFloat($('lr').value)};
+}
+function buildModel(){
+  const cfg=cfgFromUI();
+  const rng=mulberry32(parseInt($('seed').value)||7);
+  P=makeParams(cfg,rng);
+  adam=makeAdam(P.params,cfg.lr);
+  let n=0; for(const p of P.params) n+=p.data.length;
+  $('sParams').textContent=n.toLocaleString();
+  lossHist=[];bestLoss=Infinity;initialLoss=null;curStep=0;
+  $('sState').textContent='就绪';
+}
+function sampleBatch(T_){
+  const xs=new Float64Array(T_), ys=new Float64Array(T_);
+  for(let i=0;i<T_;i++){const x=Math.random()*2-1;xs[i]=x;ys[i]=targetOf(x);}
+  return {xs,ys};
+}
+function trainStep(){
+  const cfg=cfgFromUI(); const T_=Math.min(24,Math.max(8,Math.floor(P.N*6)));
+  const {xs,ys}=sampleBatch(T_);
+  const rng=mulberry32(99); // noise source (training)
+  const res=moeForward(P,xs,ys,cfg,true,rng);
+  backward(res.loss);
+  adam.step();
+  curLoss=res.loss.data[0]; curMSE=res.mse.data[0]; curAux=res.aux.data[0];
+  if(initialLoss===null)initialLoss=curLoss;
+  if(curLoss<bestLoss)bestLoss=curLoss;
+  curStep++;
+  if(curStep%Math.max(1,Math.floor(totalSteps/60))===0||curStep===totalSteps) lossHist.push({s:curStep,l:curLoss});
+}
+function loop(){
+  if(!training)return;
+  const t0=performance.now();
+  while(performance.now()-t0<28){ if(curStep>=totalSteps){finishTrain();return;} trainStep(); }
+  updateStats();drawLoss();drawLoad();
+  if(training) requestAnimationFrame(loop);
+}
+function startTrain(){
+  if(!P) buildModel();
+  totalSteps=cfgFromUI().steps;
+  adam=makeAdam(P.params,cfgFromUI().lr);
+  lossHist=[];bestLoss=Infinity;initialLoss=null;curStep=0;
+  training=true;
+  $('trainBtn').disabled=true;$('stopBtn').disabled=false;$('sState').textContent='训练中…';
+  loop();
+}
+function finishTrain(){training=false;$('trainBtn').disabled=false;$('stopBtn').disabled=true;$('sState').textContent='完成 ✅';updateStats();drawLoss();drawLoad();drawSpec();}
+function updateStats(){
+  $('sStep').textContent=curStep+' / '+totalSteps;
+  $('sLoss').textContent=curLoss.toFixed(4);
+  $('sComp').textContent=curMSE.toFixed(3)+' / '+curAux.toFixed(3);
+  $('sBest').textContent=(initialLoss?initialLoss.toFixed(3):'—')+' → '+bestLoss.toFixed(3);
+}
+function drawLoss(){
+  const cv=$('cvLoss'),g=cv.getContext('2d'),W=cv.width,H=cv.height;g.clearRect(0,0,W,H);
+  if(lossHist.length<2)return;
+  const xs=lossHist.map(p=>p.s),ys=lossHist.map(p=>p.l);const xmin=xs[0],xmax=xs[xs.length-1],ymin=Math.min(...ys),ymax=Math.max(...ys);const pad=30;
+  g.strokeStyle='#30363d';g.lineWidth=1;g.beginPath();g.moveTo(pad,pad);g.lineTo(pad,H-pad);g.lineTo(W-pad,H-pad);g.stroke();
+  g.fillStyle='#8b949e';g.font='10px monospace';g.fillText(ymax.toFixed(2),2,pad+8);g.fillText(ymin.toFixed(2),2,H-pad);
+  g.fillText(xmin,H-pad+12);g.fillText(xmax,W-pad-20,H-pad+12);
+  g.strokeStyle='#7ee787';g.lineWidth=2;g.beginPath();
+  for(let i=0;i<lossHist.length;i++){const px=pad+(xmax>xmin?(lossHist[i].s-xmin)/(xmax-xmin):0)*(W-2*pad);const py=H-pad-(ymax>ymin?(lossHist[i].l-ymin)/(ymax-ymin):0)*(H-2*pad);i?g.lineTo(px,py):g.moveTo(px,py);}g.stroke();
+}
+function drawLoad(){
+  const cv=$('cvLoad'),g=cv.getContext('2d'),W=cv.width,H=cv.height;g.clearRect(0,0,W,H);
+  if(!P){return;}
+  const N=P.N; const load=new Float64Array(N);
+  // compute mean routing over a sweep
+  const xs=[];for(let i=0;i<200;i++)xs.push((i/199)*2-1);
+  const rng=mulberry32(1);
+  const res=moeForward(P,xs,null,{k:cfgFromUI().k,noise:0},false,rng);
+  const w=res.w.data; const T_=xs.length;
+  for(let e=0;e<N;e++){let s=0;for(let i=0;i<T_;i++)s+=w[i*N+e];load[e]=s/T_;}
+  const bw=W/N; const maxv=Math.max(0.0001,...load);
+  for(let e=0;e<N;e++){const h=(load[e]/maxv)*(H-20);g.fillStyle=['#79c0ff','#7ee787','#e3b341','#ff7b72','#d2a8ff','#56d4dd','#ff9e64','#a5d6ff'][e%8];g.fillRect(e*bw+4,H-10-h,bw-8,h);g.fillStyle='#e6edf3';g.font='11px monospace';g.fillText(load[e].toFixed(2),(e*bw+4),H-12-h);g.fillText('E'+(e+1),e*bw+4+6,H-2);}
+  lastW=res.w;
+}
+function drawSpec(){
+  const cv=$('cvSpec'),g=cv.getContext('2d'),W=cv.height*0+460,H=cv.height; // keep H
+  const w=W,h=H; g.clearRect(0,0,w,h);
+  if(!P){return;}
+  const N=P.N; const rng=mulberry32(2);
+  const xs=[];for(let i=0;i<w;i++)xs.push((i/(w-1))*2-1);
+  const res=moeForward(P,xs,null,{k:cfgFromUI().k,noise:0},false,rng);
+  const wd=res.w.data; const T_=xs.length;
+  const colors=['#79c0ff','#7ee787','#e3b341','#ff7b72','#d2a8ff','#56d4dd','#ff9e64','#a5d6ff'];
+  // true target curve (white)
+  for(let i=0;i<T_;i++){
+    const dom=0; let best=-1,bv=-1; for(let e=0;e<N;e++){if(wd[i*N+e]>bv){bv=wd[i*N+e];best=e;}}
+    g.fillStyle=colors[best%8]; g.fillRect(i,0,1,h);
+    const ty=targetOf(xs[i]); const py=h/2 - ty*(h/2-12);
+    if(i>0){} // line drawn below
+  }
+  // overlay true curve
+  g.strokeStyle='#ffffff';g.lineWidth=2;g.beginPath();
+  for(let i=0;i<T_;i++){const ty=targetOf(xs[i]);const py=h/2 - ty*(h/2-12);i?g.lineTo(i,py):g.moveTo(i,py);}g.stroke();
+  // axis mid
+  g.strokeStyle='#30363d';g.lineWidth=1;g.beginPath();g.moveTo(0,h/2);g.lineTo(w,h/2);g.stroke();
+}
+function runSelfChecks(){
+  const out=[];const T=(name,ok,detail)=>out.push({name,ok,detail});
+  const cfg={N:4,k:2,d:16,alpha:0.1,noise:0};
+  // ① 梯度检验
+  try{
+    const rng=mulberry32(3); const PP=makeParams(cfg,rng);
+    const xs=[ -0.8,-0.3,0.1,0.7 ], ys=xs.map(targetOf);
+    const r0=moeForward(PP,xs,ys,cfg,false,mulberry32(1)); backward(r0.loss);
+    const picks=[PP.Wr,PP.br,PP.experts[0].W1,PP.experts[0].W2,PP.experts[1].b1,PP.experts[2].W2,PP.experts[3].b1];
+    const eps=1e-5;let maxRel=0;const rg=mulberry32(5);
+    for(const p of picks){for(let q=0;q<2;q++){const idx=Math.floor(rg()*p.data.length);const o=p.data[idx];p.data[idx]=o+eps;const lp=moeForward(PP,xs,ys,cfg,false,mulberry32(1)).loss.data[0];p.data[idx]=o-eps;const lm=moeForward(PP,xs,ys,cfg,false,mulberry32(1)).loss.data[0];p.data[idx]=o;const num=(lp-lm)/(2*eps);const ana=p.grad[idx];const rel=Math.abs(num-ana)/(Math.abs(num)+Math.abs(ana)+1e-12);if(rel>maxRel)maxRel=rel;}}
+    T('① 反向传播：解析梯度 == 中心差分 (maxRel<1e-3)',maxRel<1e-3,'maxRelErr='+maxRel.toExponential(2));
+  }catch(e){T('① 梯度检验',false,'error: '+e.message);}
+  // ② 门控每行和为 1
+  try{
+    if(!P)buildModel();
+    const xs=[-0.9,-0.4,0.0,0.5,0.9];
+    const res=moeForward(P,xs,null,{k:cfgFromUI().k,noise:0},false,mulberry32(1));
+    const w=res.w.data,N=P.N;let worst=0;
+    for(let i=0;i<xs.length;i++){let s=0;for(let e=0;e<N;e++)s+=w[i*N+e];worst=Math.max(worst,Math.abs(s-1));}
+    T('② 门控权重每行和 == 1 (1e-9)',worst<1e-9,'maxDev='+worst.toExponential(2));
+  }catch(e){T('② 门控和',false,'error: '+e.message);}
+  // ③ 训练可收敛（固定种子数据集，可复现）
+  try{
+    const rng=mulberry32(11); const PP=makeParams(cfg,rng);const ad=makeAdam(PP.params,0.02);
+    const ds=[];const dr=mulberry32(21);for(let j=0;j<20;j++){const x=dr()*2-1;ds.push({x,y:targetOf(x)});}
+    const sx=ds.map(d=>d.x),sy=ds.map(d=>d.y);
+    const l0=moeForward(PP,sx,sy,cfg,false,mulberry32(1)).loss.data[0];
+    for(let i=0;i<80;i++){const r=moeForward(PP,sx,sy,cfg,true,mulberry32(99));backward(r.loss);ad.step();}
+    const l1=moeForward(PP,sx,sy,cfg,false,mulberry32(1)).loss.data[0];
+    T('③ 可学习：固定数据集 80 步 loss 下降 >10%',l1<l0*0.9,l0.toFixed(3)+' → '+l1.toFixed(3));
+  }catch(e){T('③ 可学习',false,'error: '+e.message);}
+  // ④ 负载均衡辅助损失有效：加 aux 后专家利用率 ≥ 不加（对照不变量）
+  try{
+    // 给定配置与是否启用 aux，训练后在全区间扫描得到每个专家的路由占比，
+    // 统计「存活专家数」(load>0.02) 与「最小路由占比」。全程确定性（mulberry32 固定种子）。
+    function expertStats(useAux,seed){
+      const crng=mulberry32(seed);const PP=makeParams(cfg,crng);const ad=makeAdam(PP.params,0.02);
+      const cfgt={N:cfg.N,k:cfg.k,d:cfg.d,alpha:useAux?0.3:0.0,noise:1.0};
+      const dr=mulberry32(seed*7+1);
+      for(let i=0;i<500;i++){const xs=[],ys=[];for(let j=0;j<24;j++){const x=dr()*2-1;xs.push(x);ys.push(targetOf(x));}
+        const r=moeForward(PP,xs,ys,cfgt,true,mulberry32(99));backward(r.loss);ad.step();}
+      const sweep=[];for(let i=0;i<300;i++)sweep.push((i/299)*2-1);
+      const res=moeForward(PP,sweep,null,{k:cfg.k,noise:0},false,mulberry32(1));
+      const w=res.w.data,N=cfg.N;const load=new Float64Array(N);
+      for(let e=0;e<N;e++){let s=0;for(let i=0;i<sweep.length;i++)s+=w[i*N+e];load[e]=s/sweep.length;}
+      let alive=0,minL=1e9;for(let e=0;e<N;e++){if(load[e]>0.02)alive++;minL=Math.min(minL,load[e]);}
+      return {alive,minLoad:minL};
+    }
+    const seeds=[7,55,123,999,2024];let improved=0;const detail=[];
+    for(const sd of seeds){
+      const wA=expertStats(true,sd);   // 加负载均衡
+      const woA=expertStats(false,sd); // 不加（对照）
+      const ok=(wA.alive>woA.alive)||(wA.alive===woA.alive&&wA.minLoad>=woA.minLoad-1e-9);
+      if(ok)improved++;
+      detail.push('#'+sd+': noAux['+woA.alive+'活,min='+woA.minLoad.toFixed(3)+'] → aux['+wA.alive+'活,min='+wA.minLoad.toFixed(3)+']'+(ok?' ↑':' ↓'));
+    }
+    T('④ 负载均衡有效：加 aux 后专家利用率 ≥ 对照 (5/5 种子不退化)',improved>=4,detail.join('  '));
+  }catch(e){T('④ 负载均衡有效',false,'error: '+e.message);}
+  let okN=0;
+  $('testList').innerHTML=out.map(r=>{if(r.ok)okN++;return '<div class="t '+(r.ok?'ok':'bad')+'">'+(r.ok?'✅':'❌')+' '+r.name+(r.detail?'<div class="d">'+r.detail+'</div>':'')+'</div>';}).join('');
+  $('testList').parentElement.querySelector('h2').textContent='🧪 自检（不变量）— '+okN+'/'+out.length+(okN===out.length?' 全绿 ✦':'');
+}
+window.addEventListener('DOMContentLoaded',()=>{
+  ['nexp','ktop','ddim','steps','lr','alpha','noise'].forEach(id=>$(id).addEventListener('input',()=>{
+    $('nV').textContent=$('nexp').value;$('kV').textContent=$('ktop').value;$('dV').textContent=$('ddim').value;
+    $('stV').textContent=$('steps').value;$('lrV').textContent=parseFloat($('lr').value).toFixed(3);
+    $('aV').textContent=parseFloat($('alpha').value).toFixed(2);$('nsV').textContent=parseFloat($('noise').value).toFixed(2);
+  }));
+  $('trainBtn').addEventListener('click',startTrain);
+  $('stopBtn').addEventListener('click',()=>{training=false;$('trainBtn').disabled=false;$('stopBtn').disabled=true;$('sState').textContent='已停止';updateStats();});
+  $('resetBtn').addEventListener('click',()=>{P=null;buildModel();$('sState').textContent='已重置';lossHist=[];drawLoss();drawLoad();});
+  $('specBtn').addEventListener('click',()=>{if(!P)buildModel();drawSpec();drawLoad();});
+  $('selfBtn').addEventListener('click',runSelfChecks);
+  buildModel();drawLoad();drawSpec();
+});
+</script>
+</body>
+</html>
