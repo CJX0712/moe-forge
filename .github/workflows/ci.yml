@@ -1,0 +1,49 @@
+name: forge-verify
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Extract and syntax-check inlined JS
+        run: |
+          mkdir -p .forge-lint
+          node - <<'NODE'
+          const fs = require('fs');
+          const files = fs.readdirSync('.').filter(f => f.endsWith('.html') || f.endsWith('.htm'));
+          if (!files.length) { console.error('no HTML entry found'); process.exit(1); }
+          let total = 0;
+          for (const f of files) {
+            const src = fs.readFileSync(f, 'utf8');
+            const blocks = [...src.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)];
+            blocks.forEach((m, i) => {
+              fs.writeFileSync(`.forge-lint/${f.replace(/[^\w]/g, '_')}_${i}.js`, m[1]);
+              total++;
+            });
+            if (!/<html[\s>]/i.test(src)) { console.error(`${f}: missing <html> root`); process.exit(1); }
+            if (/https?:\/\/(?!www\.w3\.org)/i.test(src.replace(/<!--[\s\S]*?-->/g, ''))) {
+              console.warn(`::warning file=${f}::external resource reference detected (zero-dependency contract)`);
+            }
+          }
+          if (!total) { console.error('no inline <script> found to verify'); process.exit(1); }
+          console.log(`extracted ${total} script block(s)`);
+          NODE
+
+      - name: node --check
+        run: |
+          fail=0
+          for f in .forge-lint/*.js; do
+            node --check "$f" || { echo "::error file=$f::syntax error"; fail=1; }
+          done
+          exit $fail
